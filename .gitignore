@@ -1,0 +1,35 @@
+# Supabase
+supabase/.branches
+supabase/.temp
+.env
+.env.local
+
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+build/
+dist/
+package-lock.json
+
+# Flutter
+sender-app/.dart_tool/
+sender-app/.flutter-plugins
+sender-app/.flutter-plugins-dependencies
+sender-app/.packages
+sender-app/build/
+sender-app/.pub-cache/
+sender-app/.pub/
+sender-app/ios/Pods/
+sender-app/ios/.symlinks/
+
+# Android
+android-kiosk/.gradle/
+android-kiosk/build/
+android-kiosk/app/build/
+android-kiosk/local.properties
+android-kiosk/*.iml
+android-kiosk/.idea/
+
+# General
+.DS_Store
+*.log
