@@ -8,6 +8,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -16,6 +17,7 @@ data class DevicePolicy(
     val displayMode: String,
     val slideshowIntervalSeconds: Int,
     val complianceCheckIntervalMinutes: Int,
+    val maxLocalCacheGb: Double?,
 )
 
 data class MediaItem(
@@ -64,6 +66,7 @@ object SupabaseApi {
             displayMode = policyJson.getString("display_mode"),
             slideshowIntervalSeconds = policyJson.getInt("slideshow_interval_seconds"),
             complianceCheckIntervalMinutes = policyJson.getInt("compliance_check_interval_minutes"),
+            maxLocalCacheGb = if (policyJson.isNull("max_local_cache_gb")) null else policyJson.getDouble("max_local_cache_gb"),
         )
 
         val itemsJson = json.getJSONArray("items")
@@ -77,6 +80,56 @@ object SupabaseApi {
             )
         }
         MediaBatch(policy, items)
+    }
+
+    // ---- Offline media cache
+
+    // Streams the signed URL straight to disk (never loads the whole file
+    // into memory -- matters for video). Downloads to a .part sibling first
+    // and renames on success so a crash/kill mid-download can never leave a
+    // corrupt file mistaken for a complete one.
+    suspend fun downloadToFile(url: String, destFile: File): Long = withContext(Dispatchers.IO) {
+        val partFile = File(destFile.parentFile, "${destFile.name}.part")
+        val request = Request.Builder().url(url).get().build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw SupabaseApiException("download failed (${response.code}) for $url")
+            }
+            val body = response.body ?: throw SupabaseApiException("empty download body for $url")
+            partFile.outputStream().use { out -> body.byteStream().copyTo(out) }
+        }
+
+        val bytes = partFile.length()
+        if (!partFile.renameTo(destFile)) {
+            partFile.delete()
+            throw SupabaseApiException("could not finalize downloaded file $destFile")
+        }
+        bytes
+    }
+
+    suspend fun markDelivered(deviceToken: String, mediaRecipientId: String) = withContext(Dispatchers.IO) {
+        patchRest(
+            "media_recipients?id=eq.$mediaRecipientId",
+            JSONObject().put("delivered_at", Instant.now().toString()),
+            deviceToken,
+        )
+    }
+
+    suspend fun markViewed(deviceToken: String, mediaRecipientId: String) = withContext(Dispatchers.IO) {
+        patchRest(
+            "media_recipients?id=eq.$mediaRecipientId",
+            JSONObject().put("viewed_at", Instant.now().toString()),
+            deviceToken,
+        )
+    }
+
+    suspend fun clearDeliveredFlags(deviceToken: String, deviceId: String) = withContext(Dispatchers.IO) {
+        patchRest(
+            "media_recipients?device_id=eq.$deviceId",
+            JSONObject().put("delivered_at", JSONObject.NULL),
+            deviceToken,
+        )
     }
 
     // ---- Compliance / remote commands (direct PostgREST, no Edge Function

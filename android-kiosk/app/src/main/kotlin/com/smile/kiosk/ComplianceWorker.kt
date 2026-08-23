@@ -50,14 +50,14 @@ class ComplianceWorker(context: Context, params: WorkerParameters) : CoroutineWo
 
         runCatching {
             SupabaseApi.getPendingCommands(deviceToken, deviceId).forEach { command ->
-                handleCommand(command, deviceToken)
+                handleCommand(command, deviceToken, deviceId)
             }
         }
 
         return Result.success()
     }
 
-    private suspend fun handleCommand(command: RemoteCommand, deviceToken: String) {
+    private suspend fun handleCommand(command: RemoteCommand, deviceToken: String, deviceId: String) {
         try {
             when (command.commandType) {
                 "refresh_policy" -> {
@@ -83,9 +83,12 @@ class ComplianceWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     }
                 }
                 "clear_media_cache" -> {
-                    // No on-disk media cache yet (Phase 1 streams straight
-                    // from signed URLs) -- nothing to actually clear.
-                    SupabaseApi.updateCommandStatus(deviceToken, command.id, "failed", "not_yet_implemented")
+                    MediaCacheStore(applicationContext).clearAll()
+                    // Reset the "has this device actually got it on disk"
+                    // signal too, so the next sync cycle re-downloads
+                    // everything and delivered_at stays truthful.
+                    SupabaseApi.clearDeliveredFlags(deviceToken, deviceId)
+                    SupabaseApi.updateCommandStatus(deviceToken, command.id, "completed")
                 }
                 else -> {
                     SupabaseApi.updateCommandStatus(deviceToken, command.id, "failed", "unknown_command_type")

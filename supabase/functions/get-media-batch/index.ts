@@ -57,7 +57,7 @@ Deno.serve(async (req) => {
   const { data: recipients, error: recipientsError } = await supabase
     .from("media_recipients")
     .select(
-      "id, sort_order, delivered_at, media_items!inner(id, media_type, storage_path_display, storage_path_thumbnail, processing_status, duration_seconds, created_at)",
+      "id, sort_order, media_items!inner(id, media_type, storage_path_display, storage_path_thumbnail, processing_status, duration_seconds, created_at)",
     )
     .eq("device_id", claims.device_id)
     .is("hidden_at", null)
@@ -67,7 +67,6 @@ Deno.serve(async (req) => {
   if (recipientsError) return jsonResponse({ error: "query_failed" }, 500);
 
   const items = [];
-  const nowDeliveredIds: string[] = [];
 
   for (const r of recipients ?? []) {
     const mediaItem = Array.isArray(r.media_items) ? r.media_items[0] : r.media_items;
@@ -91,16 +90,14 @@ Deno.serve(async (req) => {
       display_url: displayUrl?.signedUrl ?? null,
       thumbnail_url: thumbUrl?.signedUrl ?? null,
     });
-
-    if (!r.delivered_at) nowDeliveredIds.push(r.id);
   }
 
-  if (nowDeliveredIds.length > 0) {
-    await supabase
-      .from("media_recipients")
-      .update({ delivered_at: new Date().toISOString() })
-      .in("id", nowDeliveredIds);
-  }
+  // delivered_at is intentionally NOT set here anymore -- this endpoint only
+  // hands out metadata + signed URLs. The kiosk app itself PATCHes
+  // media_recipients.delivered_at once it has actually downloaded and
+  // verified the bytes locally (see SupabaseApi.markDelivered), since
+  // "the device knows about it" and "the device has it cached offline" are
+  // different things and only the latter is what delivered_at should mean.
 
   const deviceUpdate: Record<string, unknown> = {
     last_seen_at: new Date().toISOString(),

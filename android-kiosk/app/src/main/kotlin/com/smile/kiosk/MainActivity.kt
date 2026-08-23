@@ -2,38 +2,47 @@ package com.smile.kiosk
 
 import android.app.admin.DevicePolicyManager
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.URL
 
-// Phase 3: pairing + slideshow + full lockdown. As soon as this app is
-// Device Owner, applyLockdown() runs unconditionally on every start (even
-// before pairing) -- there is deliberately no settings UI and no manual
-// "activate lock" affordance, matching the plan's requirement that the
-// device can't be fiddled with. The only way out of lock task is a future
-// remote command (reset_to_policy), never something reachable on-device.
+// Phase 3+5a: pairing + fully offline-capable slideshow + lockdown. As soon
+// as this app is Device Owner, applyLockdown() runs unconditionally on every
+// start (even before pairing) -- there is deliberately no settings UI and no
+// manual "activate lock" affordance, matching the plan's requirement that
+// the device can't be fiddled with. The only way out of lock task is a
+// future remote command (reset_to_policy), never something reachable
+// on-device.
+//
+// Rendering NEVER touches the network: advanceSlideshow() only ever reads
+// from the local MediaCacheStore. syncMedia() is the only thing that talks
+// to Supabase, and it runs on a timer independent of what's on screen.
 class MainActivity : ComponentActivity() {
 
     private lateinit var credentials: DeviceCredentialsStore
     private lateinit var dpm: DevicePolicyManager
     private lateinit var root: LinearLayout
+    private lateinit var cacheStore: MediaCacheStore
 
     private val handler = Handler(Looper.getMainLooper())
-    private var slideshowItems: List<MediaItem> = emptyList()
+    private var cachedItems: List<CachedMediaEntry> = emptyList()
     private var slideshowIndex = 0
     private var slideshowIntervalMs = 8000L
+    private var maxLocalCacheGb: Double? = null
     private val advanceRunnable = Runnable { advanceSlideshow() }
 
     // The app stays foregrounded permanently in kiosk mode, so a simple
@@ -49,6 +58,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         credentials = DeviceCredentialsStore(this)
         dpm = getSystemService(DevicePolicyManager::class.java)
+        cacheStore = MediaCacheStore(this)
 
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -58,10 +68,10 @@ class MainActivity : ComponentActivity() {
         setContentView(root)
 
         KioskLockdown.apply(this)
-        scheduleComplianceWorker()
+        ComplianceWorker.schedule(applicationContext)
 
         if (credentials.isProvisioned()) {
-            loadAndShowSlideshow()
+            showSlideshowFromLocalCache()
         } else {
             showPairingScreen()
         }
@@ -71,10 +81,6 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         handler.removeCallbacks(advanceRunnable)
         handler.removeCallbacks(mediaSyncRunnable)
-    }
-
-    private fun scheduleComplianceWorker() {
-        ComplianceWorker.schedule(applicationContext)
     }
 
     // ---- Pairing ----
@@ -114,7 +120,7 @@ class MainActivity : ComponentActivity() {
                         credentials.deviceId = deviceId
                         credentials.tenantId = tenantId
                         credentials.deviceToken = deviceToken
-                        loadAndShowSlideshow()
+                        showSlideshowFromLocalCache()
                     } catch (e: Exception) {
                         errorText.text = "Fehler: ${e.message}"
                     }
@@ -124,34 +130,40 @@ class MainActivity : ComponentActivity() {
         root.addView(pairButton)
     }
 
-    // ---- Slideshow ----
+    // ---- Slideshow (offline-first: render from cache, sync in the background) ----
 
-    private fun loadAndShowSlideshow() {
+    private lateinit var imageView: ImageView
+    private lateinit var videoView: VideoView
+
+    private fun showSlideshowFromLocalCache() {
         root.removeAllViews()
-        val loadingText = TextView(this).apply {
-            text = "Lade Medien..."
-            gravity = Gravity.CENTER
-        }
-        root.addView(loadingText)
+        root.setPadding(0, 0, 0, 0)
 
-        lifecycleScope.launch {
-            try {
-                val batch = fetchMediaBatch()
-                slideshowItems = batch.items.filter { !it.displayUrl.isNullOrEmpty() }
-                slideshowIntervalMs = batch.policy.slideshowIntervalSeconds * 1000L
-                slideshowIndex = 0
-                showSlideshowView()
-                advanceSlideshow()
-                scheduleMediaSync()
-            } catch (e: Exception) {
-                loadingText.text = "Fehler beim Laden: ${e.message}"
-            }
+        imageView = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            )
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(android.graphics.Color.BLACK)
         }
-    }
+        videoView = VideoView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            )
+            visibility = View.GONE
+        }
+        root.addView(imageView)
+        root.addView(videoView)
 
-    private suspend fun fetchMediaBatch(): MediaBatch {
-        val token = credentials.deviceToken ?: throw IllegalStateException("Kein Device-Token")
-        return SupabaseApi.getMediaBatch(token)
+        // Render whatever's already on disk immediately -- no network wait.
+        cachedItems = cacheStore.load().sortedBy { it.sortOrder }
+        advanceSlideshow()
+
+        // Then refresh from the server in the background; this is the only
+        // thing in the whole slideshow path that touches the network.
+        syncMedia()
     }
 
     private fun scheduleMediaSync() {
@@ -162,55 +174,123 @@ class MainActivity : ComponentActivity() {
     private fun syncMedia() {
         lifecycleScope.launch {
             try {
-                val batch = fetchMediaBatch()
-                slideshowItems = batch.items.filter { !it.displayUrl.isNullOrEmpty() }
+                val token = credentials.deviceToken ?: return@launch
+                val batch = SupabaseApi.getMediaBatch(token)
                 slideshowIntervalMs = batch.policy.slideshowIntervalSeconds * 1000L
-                // Deliberately don't reset slideshowIndex or interrupt the
-                // current image -- new items just join the rotation next
-                // time advanceSlideshow() picks an index.
+                maxLocalCacheGb = batch.policy.maxLocalCacheGb
+
+                val remoteItems = batch.items.filter { !it.displayUrl.isNullOrEmpty() }
+                var local = cacheStore.load()
+                val diff = MediaCacheSync.diff(remoteItems, local)
+
+                // Evict anything the server no longer assigns to this device.
+                diff.toDelete.forEach { entry -> cacheStore.deleteFile(entry) }
+                local = local.filterNot { entry -> diff.toDelete.any { it.mediaItemId == entry.mediaItemId } }
+
+                // Download anything new. One at a time on purpose -- this is
+                // a background loop, not something a person is waiting on,
+                // and it keeps memory/bandwidth bounded on modest tablets.
+                val newlyDelivered = mutableListOf<CachedMediaEntry>()
+                for (item in diff.toDownload) {
+                    val displayUrl = item.displayUrl ?: continue
+                    val fileName = cacheStore.fileNameFor(item)
+                    val destFile = cacheStore.fileFor(
+                        CachedMediaEntry(item.mediaItemId, item.mediaRecipientId, item.mediaType, fileName, 0, 0, false),
+                    )
+                    try {
+                        val bytes = SupabaseApi.downloadToFile(displayUrl, destFile)
+                        val entry = CachedMediaEntry(
+                            mediaItemId = item.mediaItemId,
+                            mediaRecipientId = item.mediaRecipientId,
+                            mediaType = item.mediaType,
+                            localFileName = fileName,
+                            fileSizeBytes = bytes,
+                            sortOrder = remoteItems.indexOf(item).toLong(),
+                            delivered = false,
+                        )
+                        local = local + entry
+                        newlyDelivered += entry
+                    } catch (_: Exception) {
+                        // Leave it for the next sync cycle to retry.
+                    }
+                }
+
+                // Fix up sort order to match the server's ordering exactly.
+                local = remoteItems.mapNotNull { remote -> local.find { it.mediaItemId == remote.mediaItemId } }
+                    .mapIndexed { index, entry -> entry.copy(sortOrder = index.toLong()) }
+
+                val capGb = maxLocalCacheGb
+                if (capGb != null) {
+                    val maxBytes = (capGb * 1_000_000_000L).toLong()
+                    val toEvict = MediaCacheSync.entriesToEvictForCap(local, maxBytes)
+                    toEvict.forEach { entry -> cacheStore.deleteFile(entry) }
+                    local = local.filterNot { entry -> toEvict.any { it.mediaItemId == entry.mediaItemId } }
+                }
+
+                cacheStore.save(local)
+                cachedItems = local.sortedBy { it.sortOrder }
+
+                newlyDelivered.forEach { entry ->
+                    runCatching { SupabaseApi.markDelivered(token, entry.mediaRecipientId) }
+                }
+                if (newlyDelivered.isNotEmpty()) {
+                    cacheStore.save(local.map { if (it in newlyDelivered) it.copy(delivered = true) else it })
+                }
             } catch (_: Exception) {
                 // Fallback poll; a failed refresh just tries again next cycle.
+                // Whatever's already cached keeps displaying regardless.
             } finally {
                 scheduleMediaSync()
             }
         }
     }
 
-    private lateinit var imageView: ImageView
-
-    private fun showSlideshowView() {
-        root.removeAllViews()
-        root.setPadding(0, 0, 0, 0)
-        imageView = ImageView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT,
-            )
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(android.graphics.Color.BLACK)
-        }
-        root.addView(imageView)
-    }
-
     private fun advanceSlideshow() {
         handler.removeCallbacks(advanceRunnable)
-        if (slideshowItems.isEmpty()) {
+        videoView.setOnCompletionListener(null)
+        videoView.setOnErrorListener(null)
+
+        if (cachedItems.isEmpty()) {
             handler.postDelayed(advanceRunnable, slideshowIntervalMs)
             return
         }
-        val item = slideshowItems[slideshowIndex % slideshowItems.size]
-        slideshowIndex++
 
+        val entry = cachedItems[slideshowIndex % cachedItems.size]
+        slideshowIndex++
+        val file = cacheStore.fileFor(entry)
+
+        if (!file.exists()) {
+            // Stale index entry (e.g. cleared cache mid-download); skip fast.
+            handler.postDelayed(advanceRunnable, 200)
+            return
+        }
+
+        markViewedBestEffort(entry)
+
+        if (entry.mediaType == "video") {
+            imageView.visibility = View.GONE
+            videoView.visibility = View.VISIBLE
+            videoView.setVideoURI(Uri.fromFile(file))
+            videoView.setOnCompletionListener { advanceSlideshow() }
+            videoView.setOnErrorListener { _, _, _ -> advanceSlideshow(); true }
+            videoView.start()
+        } else {
+            videoView.visibility = View.GONE
+            imageView.visibility = View.VISIBLE
+            lifecycleScope.launch {
+                val bitmap = withContext(Dispatchers.IO) {
+                    runCatching { BitmapFactory.decodeFile(file.path) }.getOrNull()
+                }
+                if (bitmap != null) imageView.setImageBitmap(bitmap)
+                handler.postDelayed(advanceRunnable, slideshowIntervalMs)
+            }
+        }
+    }
+
+    private fun markViewedBestEffort(entry: CachedMediaEntry) {
+        val token = credentials.deviceToken ?: return
         lifecycleScope.launch {
-            val bitmap = withContext(Dispatchers.IO) {
-                runCatching {
-                    URL(item.displayUrl).openStream().use { BitmapFactory.decodeStream(it) }
-                }.getOrNull()
-            }
-            if (bitmap != null) {
-                imageView.setImageBitmap(bitmap)
-            }
-            handler.postDelayed(advanceRunnable, slideshowIntervalMs)
+            runCatching { SupabaseApi.markViewed(token, entry.mediaRecipientId) }
         }
     }
 }
