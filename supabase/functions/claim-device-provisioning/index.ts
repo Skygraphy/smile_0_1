@@ -57,7 +57,30 @@ Deno.serve(async (req) => {
       .single();
 
     if (insertError || !newDevice) return jsonResponse({ error: "device_creation_failed" }, 500);
-    deviceId = newDevice.id;
+    deviceId = newDevice.id as string;
+
+    // Full-mesh default: a brand-new device joins the group already paired
+    // to every existing member, matching the WhatsApp-style "everyone in the
+    // group can post to every device" mental model. Admins can remove
+    // individual pairs afterward; device_senders is a free many-to-many
+    // table, this is just the starting state.
+    const { data: existingMembers } = await supabase
+      .from("tenant_members")
+      .select("user_id")
+      .eq("tenant_id", pairingCode.tenant_id);
+
+    if (existingMembers && existingMembers.length > 0) {
+      await supabase
+        .from("device_senders")
+        .upsert(
+          existingMembers.map((m) => ({
+            device_id: deviceId,
+            user_id: m.user_id,
+            tenant_id: pairingCode.tenant_id,
+          })),
+          { onConflict: "device_id,user_id", ignoreDuplicates: true },
+        );
+    }
   } else {
     const { error: updateError } = await supabase
       .from("devices")

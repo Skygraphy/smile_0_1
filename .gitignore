@@ -33,3 +33,4 @@ android-kiosk/.idea/
 # General
 .DS_Store
 *.log
+supabase_pw
