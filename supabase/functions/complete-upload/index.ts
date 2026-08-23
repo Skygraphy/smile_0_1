@@ -38,6 +38,15 @@ Deno.serve(async (req) => {
   if (fetchError || !mediaItem) return jsonResponse({ error: "media_item_not_found" }, 404);
 
   if (mediaItem.media_type === "photo") {
+    // Passthrough copy into the bucket get-media-batch actually reads from.
+    // Phase 5 replaces this with a real resize step; for now display = original bytes.
+    const { error: copyError } = await supabaseAdmin.storage
+      .from("media-originals")
+      .copy(mediaItem.storage_path_original, mediaItem.storage_path_original, {
+        destinationBucket: "media-display",
+      });
+    if (copyError) return jsonResponse({ error: "display_copy_failed", detail: copyError.message }, 500);
+
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("media_items")
       .update({

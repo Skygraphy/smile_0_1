@@ -85,7 +85,7 @@ class _LoginScreenState extends State<LoginScreen> {
               TextField(
                 controller: _codeController,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: '6-stelliger Code aus der E-Mail'),
+                decoration: const InputDecoration(labelText: 'Code aus der E-Mail'),
               ),
               const SizedBox(height: 16),
             ],

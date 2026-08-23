@@ -9,7 +9,10 @@ import '../main.dart';
 // Phase 1 thin slice: no pairing UI yet, so we send to this one manually
 // provisioned test device (see the claim-device-provisioning walkthrough).
 // Replace with a real device picker once pairing (Phase 5) exists.
-const _testDeviceId = 'f669d561-99ce-4acb-82c5-0778e300dcee';
+// Currently pointed at the real kiosk tablet (SM_X200) instead of the
+// original fake test device, so uploads actually show up during hardware
+// testing.
+const _testDeviceId = '228eb5f3-4fe4-4d22-84af-4c98509007e5';
 
 class UploadScreen extends StatefulWidget {
   const UploadScreen({super.key});
@@ -111,6 +114,10 @@ class _UploadScreenState extends State<UploadScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text('Angemeldet als: ${supabase.auth.currentUser?.email ?? '-'}'),
+            Text(
+              'User-ID: ${supabase.auth.currentUser?.id ?? '-'}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: _busy ? null : () => _pickAndUpload(source: ImageSource.gallery),
