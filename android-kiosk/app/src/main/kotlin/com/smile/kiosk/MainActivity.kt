@@ -1,13 +1,16 @@
 package com.smile.kiosk
 
 import android.app.admin.DevicePolicyManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.Gravity
 import android.util.Log
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
@@ -343,12 +346,42 @@ class MainActivity : ComponentActivity() {
             imageView.visibility = View.VISIBLE
             lifecycleScope.launch {
                 val bitmap = withContext(Dispatchers.IO) {
-                    runCatching { BitmapFactory.decodeFile(file.path) }.getOrNull()
+                    runCatching { decodeBitmapRespectingExifOrientation(file.path) }.getOrNull()
                 }
                 if (bitmap != null) imageView.setImageBitmap(bitmap)
                 if (displayMode != "manual") handler.postDelayed(advanceRunnable, slideshowIntervalMs)
             }
         }
+    }
+
+    // BitmapFactory.decodeFile() ignores EXIF orientation entirely -- photos
+    // taken holding a phone in portrait (the common case for family snaps)
+    // come back sideways or upside down on screen unless this is corrected
+    // by hand.
+    private fun decodeBitmapRespectingExifOrientation(path: String): Bitmap? {
+        val bitmap = BitmapFactory.decodeFile(path) ?: return null
+        val orientation = ExifInterface(path).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL,
+        )
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            else -> return bitmap
+        }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
     private fun markViewedBestEffort(entry: CachedMediaEntry) {
