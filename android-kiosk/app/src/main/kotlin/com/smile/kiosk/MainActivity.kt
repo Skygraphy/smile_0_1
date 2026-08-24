@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
@@ -193,11 +194,16 @@ class MainActivity : ComponentActivity() {
     // advances, left half goes back; no gestures, no icons to interpret.
     private fun setupTapNavigation() {
         root.setOnTouchListener { view, event ->
-            if (displayMode != "manual" || event.action != MotionEvent.ACTION_UP) {
-                return@setOnTouchListener false
+            // Returning false on ACTION_DOWN opts out of the whole gesture --
+            // Android then never delivers the matching ACTION_UP to this
+            // listener at all. So ACTION_DOWN must be claimed (return true)
+            // whenever we're interested in the eventual ACTION_UP; only the
+            // UP itself actually advances the slideshow.
+            if (displayMode != "manual") return@setOnTouchListener false
+            if (event.action == MotionEvent.ACTION_UP) {
+                slideshowIndex += if (event.x > view.width / 2f) 1 else -1
+                renderCurrent()
             }
-            slideshowIndex += if (event.x > view.width / 2f) 1 else -1
-            renderCurrent()
             true
         }
     }
@@ -279,9 +285,10 @@ class MainActivity : ComponentActivity() {
                 if (newlyDelivered.isNotEmpty()) {
                     cacheStore.save(local.map { if (it in newlyDelivered) it.copy(delivered = true) else it })
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // Fallback poll; a failed refresh just tries again next cycle.
                 // Whatever's already cached keeps displaying regardless.
+                Log.w("MainActivityDebug", "sync failed", e)
             } finally {
                 scheduleMediaSync()
             }
