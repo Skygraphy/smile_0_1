@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.UserManager
+import android.provider.Settings
 
 data class LockdownStatus(val isDeviceOwner: Boolean, val isLockTaskActive: Boolean, val driftDetails: List<String>)
 
@@ -53,6 +54,14 @@ object KioskLockdown {
             addCategory(Intent.CATEGORY_DEFAULT)
         }
         dpm.addPersistentPreferredActivity(admin, homeFilter, ComponentName(context, MainActivity::class.java))
+
+        // Keeps USB debugging reachable for support/maintenance without
+        // anyone needing physical access to Settings -> Developer Options
+        // (which lock task blocks from ever being reached anyway). Doesn't
+        // weaken the lockdown: DISALLOW_INSTALL_UNKNOWN_SOURCES etc. above
+        // are untouched, and adb alone can't get past Lock Task without this
+        // same device-owner app cooperating.
+        runCatching { dpm.setGlobalSetting(admin, Settings.Global.ADB_ENABLED, "1") }
     }
 
     // Read-only compliance check -- never mutates anything, just reports.
