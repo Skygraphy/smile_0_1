@@ -75,8 +75,15 @@ class MainActivity : ComponentActivity() {
         KioskLockdown.apply(this)
         ComplianceWorker.schedule(applicationContext)
 
+        val pendingPairingCode = credentials.pendingPairingCode
         if (credentials.isProvisioned()) {
             showSlideshowFromLocalCache()
+        } else if (!pendingPairingCode.isNullOrBlank()) {
+            // Arrived here via QR provisioning (KioskDeviceAdminReceiver) --
+            // consume the code immediately so a later manual re-pair (e.g.
+            // after a reset_to_policy wipe) never accidentally replays it.
+            credentials.pendingPairingCode = null
+            showPairingScreen(prefillCode = pendingPairingCode, autoSubmit = true)
         } else {
             showPairingScreen()
         }
@@ -90,7 +97,7 @@ class MainActivity : ComponentActivity() {
 
     // ---- Pairing ----
 
-    private fun showPairingScreen() {
+    private fun showPairingScreen(prefillCode: String? = null, autoSubmit: Boolean = false) {
         root.removeAllViews()
 
         val statusText = TextView(this).apply {
@@ -105,6 +112,7 @@ class MainActivity : ComponentActivity() {
 
         val codeInput = EditText(this).apply {
             hint = "Pairing-Code"
+            if (prefillCode != null) setText(prefillCode)
         }
         root.addView(codeInput)
 
@@ -113,26 +121,34 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(errorText)
 
-        val pairButton = Button(this).apply {
-            text = "Koppeln"
-            setOnClickListener {
-                val code = codeInput.text.toString().trim()
-                if (code.isEmpty()) return@setOnClickListener
-                errorText.text = "Verbinde..."
-                lifecycleScope.launch {
-                    try {
-                        val (deviceId, tenantId, deviceToken) = SupabaseApi.claimDeviceProvisioning(code)
-                        credentials.deviceId = deviceId
-                        credentials.tenantId = tenantId
-                        credentials.deviceToken = deviceToken
-                        showSlideshowFromLocalCache()
-                    } catch (e: Exception) {
-                        errorText.text = "Fehler: ${e.message}"
-                    }
+        fun submitCode(code: String) {
+            if (code.isEmpty()) return
+            errorText.setTextColor(android.graphics.Color.RED)
+            errorText.text = "Verbinde..."
+            lifecycleScope.launch {
+                try {
+                    val (deviceId, tenantId, deviceToken) = SupabaseApi.claimDeviceProvisioning(code)
+                    credentials.deviceId = deviceId
+                    credentials.tenantId = tenantId
+                    credentials.deviceToken = deviceToken
+                    showSlideshowFromLocalCache()
+                } catch (e: Exception) {
+                    errorText.text = "Fehler: ${e.message}"
                 }
             }
         }
+
+        val pairButton = Button(this).apply {
+            text = "Koppeln"
+            setOnClickListener { submitCode(codeInput.text.toString().trim()) }
+        }
         root.addView(pairButton)
+
+        // QR provisioning handed us a code directly -- connect right away
+        // instead of making someone re-type what a machine already knows.
+        // If it turns out to be stale/invalid, the error above still lands
+        // on this same screen with the code pre-filled for manual retry.
+        if (autoSubmit && prefillCode != null) submitCode(prefillCode)
     }
 
     // ---- Slideshow (offline-first: render from cache, sync in the background) ----

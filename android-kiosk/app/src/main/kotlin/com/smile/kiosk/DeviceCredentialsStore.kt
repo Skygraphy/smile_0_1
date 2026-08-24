@@ -22,6 +22,15 @@ class DeviceCredentialsStore(context: Context) {
         get() = prefs.getString("device_token", null)
         set(value) = prefs.edit().putString("device_token", value).apply()
 
+    // Set by KioskDeviceAdminReceiver.onProfileProvisioningComplete when the
+    // device was set up via QR provisioning (the pairing code travels inside
+    // the provisioning intent's admin-extras bundle, not typed by a person).
+    // MainActivity consumes and clears this on its very first launch after
+    // provisioning so a manual re-pair later never accidentally replays it.
+    var pendingPairingCode: String?
+        get() = prefs.getString("pending_pairing_code", null)
+        set(value) = prefs.edit().putString("pending_pairing_code", value).apply()
+
     fun isProvisioned(): Boolean = deviceToken != null
 
     fun clear() = prefs.edit().clear().apply()
