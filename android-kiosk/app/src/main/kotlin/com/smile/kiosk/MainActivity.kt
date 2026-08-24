@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
@@ -28,7 +29,7 @@ import kotlinx.coroutines.withContext
 // future remote command (reset_to_policy), never something reachable
 // on-device.
 //
-// Rendering NEVER touches the network: advanceSlideshow() only ever reads
+// Rendering NEVER touches the network: renderCurrent() only ever reads
 // from the local MediaCacheStore. syncMedia() is the only thing that talks
 // to Supabase, and it runs on a timer independent of what's on screen.
 class MainActivity : ComponentActivity() {
@@ -43,7 +44,11 @@ class MainActivity : ComponentActivity() {
     private var slideshowIndex = 0
     private var slideshowIntervalMs = 8000L
     private var maxLocalCacheGb: Double? = null
-    private val advanceRunnable = Runnable { advanceSlideshow() }
+    // "slideshow" (default, timer-driven) or "manual" (two tap zones,
+    // left/right, no auto-advance) -- entirely policy-driven, never a
+    // setting the person at the tablet can reach.
+    private var displayMode = "slideshow"
+    private val advanceRunnable = Runnable { slideshowIndex++; renderCurrent() }
 
     // The app stays foregrounded permanently in kiosk mode, so a simple
     // in-activity repeating fetch is enough to notice new photos -- no need
@@ -156,14 +161,29 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(imageView)
         root.addView(videoView)
+        setupTapNavigation()
 
         // Render whatever's already on disk immediately -- no network wait.
         cachedItems = cacheStore.load().sortedBy { it.sortOrder }
-        advanceSlideshow()
+        renderCurrent()
 
         // Then refresh from the server in the background; this is the only
         // thing in the whole slideshow path that touches the network.
         syncMedia()
+    }
+
+    // Active only in manual mode (checked on every touch so a policy change
+    // takes effect immediately without recreating the listener). Right half
+    // advances, left half goes back; no gestures, no icons to interpret.
+    private fun setupTapNavigation() {
+        root.setOnTouchListener { view, event ->
+            if (displayMode != "manual" || event.action != MotionEvent.ACTION_UP) {
+                return@setOnTouchListener false
+            }
+            slideshowIndex += if (event.x > view.width / 2f) 1 else -1
+            renderCurrent()
+            true
+        }
     }
 
     private fun scheduleMediaSync() {
@@ -176,6 +196,8 @@ class MainActivity : ComponentActivity() {
             try {
                 val token = credentials.deviceToken ?: return@launch
                 val batch = SupabaseApi.getMediaBatch(token)
+                val modeChanged = batch.policy.displayMode != displayMode
+                displayMode = batch.policy.displayMode
                 slideshowIntervalMs = batch.policy.slideshowIntervalSeconds * 1000L
                 maxLocalCacheGb = batch.policy.maxLocalCacheGb
 
@@ -230,6 +252,11 @@ class MainActivity : ComponentActivity() {
                 cacheStore.save(local)
                 cachedItems = local.sortedBy { it.sortOrder }
 
+                // A mode switch changes whether a timer should be running at
+                // all -- re-render now instead of waiting for whatever timer
+                // state happened to be left over from the previous mode.
+                if (modeChanged) renderCurrent()
+
                 newlyDelivered.forEach { entry ->
                     runCatching { SupabaseApi.markDelivered(token, entry.mediaRecipientId) }
                 }
@@ -245,23 +272,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun advanceSlideshow() {
+    // The single rendering entry point for both display modes. In slideshow
+    // mode it schedules its own next tick (interval for photos, "on
+    // completion" for videos); in manual mode it renders exactly once and
+    // waits for a tap (setupTapNavigation) to call it again -- no timer ever
+    // runs while displayMode == "manual".
+    private fun renderCurrent() {
         handler.removeCallbacks(advanceRunnable)
         videoView.setOnCompletionListener(null)
         videoView.setOnErrorListener(null)
 
         if (cachedItems.isEmpty()) {
-            handler.postDelayed(advanceRunnable, slideshowIntervalMs)
+            if (displayMode != "manual") handler.postDelayed(advanceRunnable, slideshowIntervalMs)
             return
         }
 
-        val entry = cachedItems[slideshowIndex % cachedItems.size]
-        slideshowIndex++
+        val size = cachedItems.size
+        slideshowIndex = ((slideshowIndex % size) + size) % size
+        val entry = cachedItems[slideshowIndex]
         val file = cacheStore.fileFor(entry)
 
         if (!file.exists()) {
             // Stale index entry (e.g. cleared cache mid-download); skip fast.
-            handler.postDelayed(advanceRunnable, 200)
+            slideshowIndex++
+            if (displayMode == "manual") renderCurrent() else handler.postDelayed(advanceRunnable, 200)
             return
         }
 
@@ -271,8 +305,15 @@ class MainActivity : ComponentActivity() {
             imageView.visibility = View.GONE
             videoView.visibility = View.VISIBLE
             videoView.setVideoURI(Uri.fromFile(file))
-            videoView.setOnCompletionListener { advanceSlideshow() }
-            videoView.setOnErrorListener { _, _, _ -> advanceSlideshow(); true }
+            if (displayMode == "manual") {
+                // Nothing to advance to automatically -- loop in place so the
+                // screen keeps showing motion instead of going dark/frozen
+                // while waiting for the next tap.
+                videoView.setOnCompletionListener { it.start() }
+            } else {
+                videoView.setOnCompletionListener { slideshowIndex++; renderCurrent() }
+                videoView.setOnErrorListener { _, _, _ -> slideshowIndex++; renderCurrent(); true }
+            }
             videoView.start()
         } else {
             videoView.visibility = View.GONE
@@ -282,7 +323,7 @@ class MainActivity : ComponentActivity() {
                     runCatching { BitmapFactory.decodeFile(file.path) }.getOrNull()
                 }
                 if (bitmap != null) imageView.setImageBitmap(bitmap)
-                handler.postDelayed(advanceRunnable, slideshowIntervalMs)
+                if (displayMode != "manual") handler.postDelayed(advanceRunnable, slideshowIntervalMs)
             }
         }
     }
