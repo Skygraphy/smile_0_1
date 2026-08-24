@@ -22,6 +22,25 @@ class _DeviceOption {
   const _DeviceOption(this.id, this.name);
 }
 
+// State kept between retry attempts once create-upload has already
+// succeeded, so a flaky connection never causes a duplicate media_items row:
+// retrying re-tries only the step that actually failed (the byte transfer or
+// the completion call), reusing the same signed upload token and media item.
+class _PendingUpload {
+  final String mediaItemId;
+  final String storagePath;
+  final String uploadToken;
+  final File file;
+  bool storageUploadDone = false;
+
+  _PendingUpload({
+    required this.mediaItemId,
+    required this.storagePath,
+    required this.uploadToken,
+    required this.file,
+  });
+}
+
 class UploadScreen extends StatefulWidget {
   const UploadScreen({super.key});
 
@@ -134,13 +153,59 @@ class _UploadScreenState extends State<UploadScreen> {
     setState(() => _selectedDeviceIds.addAll(_devices.map((d) => d.id)));
   }
 
+  _PendingUpload? _pendingUpload;
+
   Future<void> _pickAndUpload({required ImageSource source}) async {
     final xfile = await _picker.pickImage(source: source, imageQuality: 90);
     if (xfile == null) return;
-    await _upload(xfile);
+    await _startUpload(File(xfile.path));
   }
 
-  Future<void> _upload(XFile xfile) async {
+  // Retries a transient failure with backoff (2s, 4s). Deliberately small --
+  // this covers a brief WiFi/mobile-data blip, not an offline queue; a
+  // longer outage surfaces as a failed status with the retry button below
+  // rather than the app hanging on a spinner.
+  Future<T> _withRetry<T>(Future<T> Function() action, {int maxAttempts = 3}) async {
+    var attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        return await action();
+      } catch (e) {
+        if (attempt >= maxAttempts) rethrow;
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _createUpload(File file) async {
+    final fileSizeBytes = await file.length();
+    final extension = file.path.split('.').last.toLowerCase();
+    final mimeType = _mimeTypeFor(extension);
+    final response = await supabase.functions.invoke(
+      'create-upload',
+      body: {
+        'media_type': 'photo',
+        'mime_type': mimeType,
+        'file_extension': extension,
+        'file_size_bytes': fileSizeBytes,
+        'device_ids': _selectedDeviceIds.toList(),
+      },
+    );
+    if (response.status != 200) {
+      throw Exception('create-upload fehlgeschlagen: ${jsonEncode(response.data)}');
+    }
+    return response.data as Map<String, dynamic>;
+  }
+
+  Future<void> _completeUpload(String mediaItemId) async {
+    final response = await supabase.functions.invoke('complete-upload', body: {'media_item_id': mediaItemId});
+    if (response.status != 200) {
+      throw Exception('complete-upload fehlgeschlagen: ${jsonEncode(response.data)}');
+    }
+  }
+
+  Future<void> _startUpload(File file) async {
     if (_selectedDeviceIds.isEmpty) {
       setState(() => _status = 'Bitte mindestens ein Gerät auswählen.');
       return;
@@ -150,48 +215,67 @@ class _UploadScreenState extends State<UploadScreen> {
       _status = 'Lade hoch...';
     });
     try {
-      final file = File(xfile.path);
-      final fileSizeBytes = await file.length();
-      final extension = xfile.path.split('.').last.toLowerCase();
-      final mimeType = _mimeTypeFor(extension);
-
-      final createResponse = await supabase.functions.invoke(
-        'create-upload',
-        body: {
-          'media_type': 'photo',
-          'mime_type': mimeType,
-          'file_extension': extension,
-          'file_size_bytes': fileSizeBytes,
-          'device_ids': _selectedDeviceIds.toList(),
-        },
+      // create-upload itself is not retried past the outer attempt: it
+      // creates a fresh media_items row, so retrying it on top of a partial
+      // success would leave duplicate/orphaned rows. Only the idempotent
+      // steps below (same signed token, same media item) get retried.
+      final createData = await _createUpload(file);
+      _pendingUpload = _PendingUpload(
+        mediaItemId: createData['media_item_id'] as String,
+        storagePath: createData['storage_path'] as String,
+        uploadToken: createData['upload_token'] as String,
+        file: file,
       );
-
-      if (createResponse.status != 200) {
-        throw Exception('create-upload fehlgeschlagen: ${jsonEncode(createResponse.data)}');
-      }
-      final createData = createResponse.data as Map<String, dynamic>;
-      final storagePath = createData['storage_path'] as String;
-      final uploadToken = createData['upload_token'] as String;
-      final mediaItemId = createData['media_item_id'] as String;
-
-      await supabase.storage
-          .from('media-originals')
-          .uploadToSignedUrl(storagePath, uploadToken, file);
-
-      final completeResponse = await supabase.functions.invoke(
-        'complete-upload',
-        body: {'media_item_id': mediaItemId},
-      );
-      if (completeResponse.status != 200) {
-        throw Exception('complete-upload fehlgeschlagen: ${jsonEncode(completeResponse.data)}');
-      }
-
-      setState(() => _status = 'Erfolgreich an ${_selectedDeviceIds.length} Gerät(e) gesendet!');
+      await _finishPendingUpload();
     } catch (e) {
       setState(() => _status = 'Fehler: $e');
     } finally {
       setState(() => _busy = false);
     }
+  }
+
+  // Runs (or resumes) the two steps after create-upload has already
+  // succeeded: the actual byte transfer, then marking the item ready. Each
+  // is retried independently and only re-run if it hasn't already
+  // succeeded, so pressing "Erneut versuchen" never re-uploads a file that
+  // already made it to storage.
+  Future<void> _finishPendingUpload() async {
+    final pending = _pendingUpload;
+    if (pending == null) return;
+    setState(() {
+      _busy = true;
+      _status = 'Lade hoch...';
+    });
+    try {
+      if (!pending.storageUploadDone) {
+        await _withRetry(
+          () => supabase.storage.from('media-originals').uploadToSignedUrl(
+                pending.storagePath,
+                pending.uploadToken,
+                pending.file,
+              ),
+        );
+        pending.storageUploadDone = true;
+      }
+      setState(() => _status = 'Schließe ab...');
+      await _withRetry(() => _completeUpload(pending.mediaItemId));
+
+      setState(() {
+        _status = 'Erfolgreich an ${_selectedDeviceIds.length} Gerät(e) gesendet!';
+        _pendingUpload = null;
+      });
+    } catch (e) {
+      setState(() => _status = 'Fehler: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  void _discardPendingUpload() {
+    setState(() {
+      _pendingUpload = null;
+      _status = null;
+    });
   }
 
   String _mimeTypeFor(String extension) {
@@ -275,7 +359,8 @@ class _UploadScreenState extends State<UploadScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final canSend = !_busy && _selectedDeviceIds.isNotEmpty;
+    final hasPending = _pendingUpload != null;
+    final canSend = !_busy && !hasPending && _selectedDeviceIds.isNotEmpty;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Foto senden'),
@@ -306,6 +391,16 @@ class _UploadScreenState extends State<UploadScreen> {
             const SizedBox(height: 24),
             if (_busy) const Center(child: CircularProgressIndicator()),
             if (_status != null) Text(_status!, textAlign: TextAlign.center),
+            if (hasPending && !_busy) ...[
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _finishPendingUpload,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Erneut versuchen'),
+              ),
+              const SizedBox(height: 8),
+              TextButton(onPressed: _discardPendingUpload, child: const Text('Verwerfen')),
+            ],
           ],
         ),
       ),
