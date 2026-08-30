@@ -9,6 +9,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.UserManager
 import android.provider.Settings
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 data class LockdownStatus(val isDeviceOwner: Boolean, val isLockTaskActive: Boolean, val driftDetails: List<String>)
 
@@ -28,11 +31,27 @@ object KioskLockdown {
         val admin = adminComponent(activity)
 
         applyPolicies(activity, dpm, admin)
+        hideSystemBars(activity)
 
         val activityManager = activity.getSystemService(ActivityManager::class.java)
         if (activityManager.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) {
             activity.startLockTask()
         }
+    }
+
+    // LOCK_TASK_FEATURE_NONE only disables *interacting* with the status/nav
+    // bars (pull-down, back gesture) -- it doesn't hide them. Without this,
+    // the status bar and a gesture-nav hint stay visibly drawn the whole
+    // time, which reads as "not actually locked down" even though it is.
+    // Transient system UI (a permission dialog, a Toast) can pop the bars
+    // back into view, so callers should re-invoke this on window focus
+    // regained, not just once at startup.
+    fun hideSystemBars(activity: Activity) {
+        val window = activity.window
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
     // The subset of lockdown that doesn't require an Activity -- usable from

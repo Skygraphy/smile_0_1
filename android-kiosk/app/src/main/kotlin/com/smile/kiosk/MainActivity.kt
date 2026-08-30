@@ -93,6 +93,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Immersive mode can get knocked back to visible by transient system UI
+    // (a permission prompt, a Toast) -- reapplying whenever this Activity
+    // regains focus is the standard way to make it stick.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && dpm.isDeviceOwnerApp(packageName)) {
+            KioskLockdown.hideSystemBars(this)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(advanceRunnable)
