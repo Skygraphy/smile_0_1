@@ -36,6 +36,12 @@ if (!apkUrl || !pairingCode) {
   process.exit(1);
 }
 
+// Forcing "fully managed device" mode (as opposed to Android defaulting to a
+// work-profile-only setup, confirmed the hard way on real hardware) is done
+// in code via KioskDeviceAdminReceiver.onGetProvisioningMode(), not here --
+// android.app.extra.PROVISIONING_ALLOWED_PROVISIONING_MODES is an
+// Intent-extra-only mechanism the plain QR-code JSON parser rejects outright
+// ("Falscher QR-Code").
 const payload = {
   "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": ADMIN_COMPONENT,
   "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": apkUrl,
