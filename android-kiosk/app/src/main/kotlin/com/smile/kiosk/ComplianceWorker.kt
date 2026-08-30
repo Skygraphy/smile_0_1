@@ -90,6 +90,12 @@ class ComplianceWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     SupabaseApi.clearDeliveredFlags(deviceToken, deviceId)
                     SupabaseApi.updateCommandStatus(deviceToken, command.id, "completed")
                 }
+                "unlock_maintenance" -> {
+                    // stopLockTask() is an Activity-only API -- this
+                    // background worker can't do it. Left pending
+                    // (deliberately not marked failed) for MainActivity's
+                    // own short-interval poll to pick up and complete.
+                }
                 else -> {
                     SupabaseApi.updateCommandStatus(deviceToken, command.id, "failed", "unknown_command_type")
                 }

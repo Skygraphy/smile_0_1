@@ -54,6 +54,26 @@ object KioskLockdown {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
+    // Counterpart to hideSystemBars(), used only for the temporary
+    // maintenance-unlock window below.
+    private fun showSystemBars(activity: Activity) {
+        val window = activity.window
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+    }
+
+    // Server-triggered only (see the "unlock_maintenance" remote command) --
+    // there is deliberately no on-device way to reach this. Exits Lock Task
+    // and restores normal system UI so Settings/Developer Options/USB
+    // debugging authorization become reachable for real maintenance, without
+    // ever needing a factory reset just to fix a bug. The caller
+    // (MainActivity) is responsible for scheduling the automatic re-lock --
+    // this never stays open indefinitely by itself.
+    fun exitForMaintenance(activity: Activity) {
+        activity.stopLockTask()
+        showSystemBars(activity)
+    }
+
     // The subset of lockdown that doesn't require an Activity -- usable from
     // the background compliance worker to repair everything except actually
     // (re-)entering lock task, which needs the activity to be in the foreground.

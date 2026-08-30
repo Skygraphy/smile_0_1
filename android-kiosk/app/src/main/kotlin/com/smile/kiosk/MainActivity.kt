@@ -13,6 +13,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -63,11 +64,25 @@ class MainActivity : ComponentActivity() {
     private val mediaSyncIntervalMs = 2 * 60 * 1000L
     private val mediaSyncRunnable = Runnable { syncMedia() }
 
+    // How long an "unlock_maintenance" remote command leaves Lock Task
+    // exited before automatically re-locking itself -- long enough to
+    // actually get something done in Settings, short enough that a kiosk
+    // never sits unlocked indefinitely just because someone forgot to
+    // re-lock it remotely afterward.
+    private val maintenanceWindowMs = 10 * 60 * 1000L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         credentials = DeviceCredentialsStore(this)
         dpm = getSystemService(DevicePolicyManager::class.java)
         cacheStore = MediaCacheStore(this)
+
+        // A kiosk that goes dark after the stock 30s screen timeout defeats
+        // the entire point -- it's meant to sit permanently powered and
+        // permanently visible. FLAG_KEEP_SCREEN_ON needs no special
+        // permission and only keeps the screen on while this Activity is
+        // actually in the foreground, which it always is here.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -221,6 +236,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // The one and only way back into Settings/Developer Options on a
+    // provisioned kiosk -- server-triggered only (insert a
+    // remote_commands row with command_type='unlock_maintenance'; there is
+    // still deliberately no on-device way to request this). Piggybacks on
+    // the existing 2-minute sync cadence rather than a dedicated poll.
+    private suspend fun checkForMaintenanceUnlock(token: String) {
+        val deviceId = credentials.deviceId ?: return
+        val unlockCommand = SupabaseApi.getPendingCommands(token, deviceId)
+            .find { it.commandType == "unlock_maintenance" } ?: return
+
+        Log.i("MainActivityDebug", "Exiting lock task for remote-triggered maintenance")
+        KioskLockdown.exitForMaintenance(this)
+        handler.postDelayed({ KioskLockdown.apply(this) }, maintenanceWindowMs)
+        SupabaseApi.updateCommandStatus(token, unlockCommand.id, "completed")
+    }
+
     private fun scheduleMediaSync() {
         handler.removeCallbacks(mediaSyncRunnable)
         handler.postDelayed(mediaSyncRunnable, mediaSyncIntervalMs)
@@ -230,6 +261,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 val token = credentials.deviceToken ?: return@launch
+                runCatching { checkForMaintenanceUnlock(token) }
                 val batch = SupabaseApi.getMediaBatch(token)
                 val modeChanged = batch.policy.displayMode != displayMode
                 displayMode = batch.policy.displayMode
