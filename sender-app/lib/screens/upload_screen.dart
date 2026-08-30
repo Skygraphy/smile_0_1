@@ -368,40 +368,44 @@ class _UploadScreenState extends State<UploadScreen> {
           IconButton(onPressed: _logout, icon: const Icon(Icons.logout)),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('Angemeldet als: ${supabase.auth.currentUser?.email ?? '-'}'),
-            const SizedBox(height: 16),
-            _buildRecipientPicker(),
-            const SizedBox(height: 24),
-            FilledButton.icon(
-              onPressed: canSend ? () => _pickAndUpload(source: ImageSource.gallery) : null,
-              icon: const Icon(Icons.photo_library),
-              label: const Text('Foto aus Galerie wählen'),
-            ),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: canSend ? () => _pickAndUpload(source: ImageSource.camera) : null,
-              icon: const Icon(Icons.camera_alt),
-              label: const Text('Foto aufnehmen'),
-            ),
-            const SizedBox(height: 24),
-            if (_busy) const Center(child: CircularProgressIndicator()),
-            if (_status != null) Text(_status!, textAlign: TextAlign.center),
-            if (hasPending && !_busy) ...[
+      body: RefreshIndicator(
+        onRefresh: _loadTenants,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Angemeldet als: ${supabase.auth.currentUser?.email ?? '-'}'),
+              const SizedBox(height: 16),
+              _buildRecipientPicker(),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: canSend ? () => _pickAndUpload(source: ImageSource.gallery) : null,
+                icon: const Icon(Icons.photo_library),
+                label: const Text('Foto aus Galerie wählen'),
+              ),
               const SizedBox(height: 12),
               FilledButton.icon(
-                onPressed: _finishPendingUpload,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Erneut versuchen'),
+                onPressed: canSend ? () => _pickAndUpload(source: ImageSource.camera) : null,
+                icon: const Icon(Icons.camera_alt),
+                label: const Text('Foto aufnehmen'),
               ),
-              const SizedBox(height: 8),
-              TextButton(onPressed: _discardPendingUpload, child: const Text('Verwerfen')),
+              const SizedBox(height: 24),
+              if (_busy) const Center(child: CircularProgressIndicator()),
+              if (_status != null) Text(_status!, textAlign: TextAlign.center),
+              if (hasPending && !_busy) ...[
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: _finishPendingUpload,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Erneut versuchen'),
+                ),
+                const SizedBox(height: 8),
+                TextButton(onPressed: _discardPendingUpload, child: const Text('Verwerfen')),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
